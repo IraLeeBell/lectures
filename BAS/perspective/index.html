@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Star Field Simulation</title>
+  <style>
+    /* Base reset and styling */
+    body, html {
+      margin: 0;
+      padding: 0;
+      background: black;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+
+    /* Canvas fills the window */
+    #starCanvas {
+      display: block;
+    }
+
+    /********** INITIAL MODAL OVERLAY STYLES **********/
+    #infoOverlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.8); /* Semi-transparent black */
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999; /* On top of everything else */
+    }
+
+    #infoBox {
+      position: relative;
+      background: rgba(20, 20, 20, 0.95);
+      border: 1px solid #444;
+      border-radius: 5px;
+      padding: 20px;
+      width: 80%;
+      max-width: 600px;
+      color: #ccc; /* Gray text */
+      font-size: 24px;
+      line-height: 1.5;
+    }
+
+    /* Red '×' in corner of the initial overlay */
+    #closeInfo {
+      position: absolute;
+      top: 10px;
+      right: 15px;
+      color: red;
+      font-size: 34px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    /********** BOTTOM GALAXY POPUP STYLES **********/
+    #galaxyPopup {
+      position: fixed;
+      bottom: 10px;
+      /* Center horizontally */
+      left: 50%;
+      transform: translateX(-50%);
+
+      /* Same dark background style as the main modal */
+      background: rgba(20, 20, 20, 0.95);
+      color: #ccc;
+      border: 1px solid #444;
+      border-radius: 5px;
+      padding: 10px;
+
+      /* Appear/disappear with opacity transition */
+      display: none;
+      opacity: 1;
+      transition: opacity 1s ease;
+
+      /* Ensure the box adjusts to content width but limit to ~2 lines */
+      display: inline-block;     
+      max-height: 3em;          
+      overflow: hidden;         
+      font-size: 24px;
+      text-align: center;       
+      white-space: nowrap;      
+    }
+  </style>
+</head>
+<body>
+
+<!-- Canvas for star field -->
+<canvas id="starCanvas"></canvas>
+
+<!-- INITIAL POPUP (modal) with explanatory text -->
+<div id="infoOverlay">
+  <div id="infoBox">
+    <span id="closeInfo">&times;</span>
+    <p>
+        This simulation displays a randomly generated sample of 4,000 stars from any galaxy in the universe.
+        Astronomical observations suggest that, on average, each star in the universe hosts at least one exoplanet.
+        When you click on the simulation, 90% of the stars will turn red, illustrating how many in this sample
+        likely have at least one exoplanet in any given region of the cosmos. Once complete, click anywhere to 
+        restart the star field with exoplanets simulation.
+      </p>
+  </div>
+</div>
+
+<!-- BOTTOM POPUP to show chosen galaxy info -->
+<div id="galaxyPopup"></div>
+
+<script>
+// =================== Configuration (You can change these!) =======================
+
+// For the star field
+const STAR_COUNT = 4000;        // Total number of stars
+const RADIUS_MIN = 0.4;         // Minimum star radius
+const RADIUS_MAX = 3.0;         // Maximum star radius
+
+// Percentage of stars in each radius quartile
+const RADIUS_Q1_PERCENT = 0.40; // 40% in the smallest radius range
+const RADIUS_Q2_PERCENT = 0.30; // 30% in the next range
+const RADIUS_Q3_PERCENT = 0.20; // 20% in the next range
+const RADIUS_Q4_PERCENT = 0.10; // 10%  in the largest range
+
+// For the red-star animation
+const RED_PERCENTAGE = 0.90;    // 90% of stars turn red
+const ANIMATION_INTERVAL = 5;  // Interval (ms) between turning each star red
+
+// For the galaxy popup
+const GALAXY_POPUP_DURATION = 5000; // 5 seconds before fade out
+const GALAXY_FADEOUT_TIME   = 1000; // 1 second fade out
+
+// =============================================================================
+
+// Canvas and rendering context
+const canvas = document.getElementById("starCanvas");
+const ctx = canvas.getContext("2d");
+
+// Track star data and animation
+let stars = [];
+let turnRedIntervalId = null;
+
+// Galaxy data
+let galaxies = [];        
+let lastGalaxyIndex = null; // so we don't pick the same galaxy consecutively
+
+// Popup elements
+let galaxyPopupTimeoutId = null;
+let galaxyPopupFadeId = null;
+const galaxyPopup = document.getElementById("galaxyPopup");
+
+// 1) Make the canvas full screen
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+
+// 2) Fetch galaxies from 'galaxies.csv'
+function loadGalaxies() {
+  fetch("galaxies.csv")
+    .then(response => response.text())
+    .then(text => {
+      const lines = text.trim().split("\n");
+      // If your CSV has a header line, skip it. Adjust as needed:
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        // Format: Name,RA(2000),DEC(2000)
+        const parts = line.split(",");
+        if (parts.length < 3) continue;
+        const name = parts[0];
+        const ra   = parts[1];
+        const dec  = parts[2];
+        galaxies.push({ name, ra, dec });
+      }
+    })
+    .catch(err => {
+      console.error("Error loading galaxies.csv:", err);
+    });
+}
+loadGalaxies();
+
+// 3) Initial overlay
+const infoOverlay = document.getElementById("infoOverlay");
+const closeInfo = document.getElementById("closeInfo");
+
+closeInfo.addEventListener("click", () => {
+  // Hide the initial overlay
+  infoOverlay.style.display = "none";
+  // Begin the first star field + animation + galaxy popup
+  resetAndBegin();
+});
+
+// 4) Any click on the canvas => new star field, new galaxy, new animation
+canvas.addEventListener("click", () => {
+  resetAndBegin();
+});
+
+/**
+ * Resets the star field (with the special quartile distribution),
+ * picks a galaxy, shows it, and starts turning 90% red.
+ */
+function resetAndBegin() {
+  // Stop any ongoing red animation
+  if (turnRedIntervalId !== null) {
+    clearInterval(turnRedIntervalId);
+    turnRedIntervalId = null;
+  }
+  // Create & draw new star field
+  initializeStars();
+  drawStars();
+  
+  // Pick new galaxy & show popup
+  const chosenGalaxy = pickRandomGalaxy();
+  if (chosenGalaxy) {
+    showGalaxyPopup(chosenGalaxy);
+  }
+
+  // Start turning stars red (90%)
+  turnStarsRedOneByOne();
+}
+
+/**
+ * Create a random star field where:
+ *  - 50% in Q1 (smallest radii)
+ *  - 30% in Q2
+ *  - 15% in Q3
+ *  - 5%  in Q4 (largest radii)
+ */
+function initializeStars() {
+  stars = [];
+  // Break RADIUS_MIN..RADIUS_MAX into 4 equal sub-ranges
+  const totalRange = RADIUS_MAX - RADIUS_MIN;
+  const step = totalRange / 4;
+  
+  // The quartile boundaries
+  const q1Min = RADIUS_MIN;
+  const q1Max = RADIUS_MIN + step;       // Q1
+  const q2Min = q1Max;
+  const q2Max = RADIUS_MIN + 2 * step;   // Q2
+  const q3Min = q2Max;
+  const q3Max = RADIUS_MIN + 3 * step;   // Q3
+  const q4Min = q3Max;
+  const q4Max = RADIUS_MAX;              // Q4
+
+  // Compute how many stars in each quartile
+  const q1Count = Math.floor(RADIUS_Q1_PERCENT * STAR_COUNT);
+  const q2Count = Math.floor(RADIUS_Q2_PERCENT * STAR_COUNT);
+  const q3Count = Math.floor(RADIUS_Q3_PERCENT * STAR_COUNT);
+  // Remainder goes to q4 to ensure total = STAR_COUNT exactly
+  const q4Count = STAR_COUNT - (q1Count + q2Count + q3Count);
+
+  // Generate Q1 stars
+  for (let i = 0; i < q1Count; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      size: randomBetween(q1Min, q1Max),
+      color: "white"
+    });
+  }
+  // Generate Q2 stars
+  for (let i = 0; i < q2Count; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      size: randomBetween(q2Min, q2Max),
+      color: "white"
+    });
+  }
+  // Generate Q3 stars
+  for (let i = 0; i < q3Count; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      size: randomBetween(q3Min, q3Max),
+      color: "white"
+    });
+  }
+  // Generate Q4 stars
+  for (let i = 0; i < q4Count; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      size: randomBetween(q4Min, q4Max),
+      color: "white"
+    });
+  }
+}
+
+/**
+ * Render all stars on the canvas.
+ */
+function drawStars() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "black";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let star of stars) {
+    ctx.beginPath();
+    ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+    ctx.fillStyle = star.color;
+    ctx.fill();
+  }
+}
+
+/**
+ * Turn 90% of the stars red, one by one, in a random order.
+ */
+function turnStarsRedOneByOne() {
+  const totalToRed = Math.floor(RED_PERCENTAGE * stars.length);
+  const indices = stars.map((_, i) => i);
+  shuffleArray(indices);
+
+  let index = 0;
+  turnRedIntervalId = setInterval(() => {
+    if (index >= totalToRed) {
+      clearInterval(turnRedIntervalId);
+      turnRedIntervalId = null;
+      return;
+    }
+    const starIndex = indices[index];
+    stars[starIndex].color = "red";
+    drawStars();
+    index++;
+  }, ANIMATION_INTERVAL);
+}
+
+/**
+ * Randomly pick a galaxy that's not the same as last time, if possible.
+ */
+function pickRandomGalaxy() {
+  if (galaxies.length === 0) return null;
+  let newIndex;
+  do {
+    newIndex = Math.floor(Math.random() * galaxies.length);
+  } while (galaxies.length > 1 && newIndex === lastGalaxyIndex);
+  
+  lastGalaxyIndex = newIndex;
+  return galaxies[newIndex];
+}
+
+/**
+ * Show the popup with galaxy name on one line and RA/Dec on the next line.
+ * Auto-fade after 5 seconds.
+ */
+function showGalaxyPopup(galaxy) {
+  // Clear any existing timers
+  if (galaxyPopupTimeoutId) {
+    clearTimeout(galaxyPopupTimeoutId);
+    galaxyPopupTimeoutId = null;
+  }
+  if (galaxyPopupFadeId) {
+    clearTimeout(galaxyPopupFadeId);
+    galaxyPopupFadeId = null;
+  }
+
+  // Two lines:
+  galaxyPopup.innerHTML = `
+    ${galaxy.name}<br>
+    RA: ${galaxy.ra} | Dec: ${galaxy.dec}
+  `;
+
+  // Show fully
+  galaxyPopup.style.display = "inline-block";
+  galaxyPopup.style.opacity = "1";
+
+  // After GALAXY_POPUP_DURATION ms, fade out over 1s
+  galaxyPopupTimeoutId = setTimeout(() => {
+    galaxyPopup.style.opacity = "0";
+    galaxyPopupFadeId = setTimeout(() => {
+      galaxyPopup.style.display = "none";
+    }, GALAXY_FADEOUT_TIME);
+  }, GALAXY_POPUP_DURATION);
+}
+
+/** Returns a random number in [min, max). */
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+/** Fisher-Yates shuffle to randomize an array in-place. */
+function shuffleArray(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+}
+</script>
+
+</body>
+</html>
